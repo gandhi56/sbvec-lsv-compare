@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Comparison output (regenerate with `lsv_vs_sbvec.py compare`)
+results/
+*.patch
+
+.DS_Store
