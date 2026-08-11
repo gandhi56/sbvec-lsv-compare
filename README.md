@@ -102,6 +102,28 @@ copy-pasteable repro command.
 | `results.json` | everything, for further analysis |
 | `ir/` | with `--keep-ir`: input / LSV / SandboxVectorizer IR and stderr per case |
 
+## Sample results
+
+Against llvm-project `bba25a8d818e`, `X86;AMDGPU` only (the 20 NVPTX/AArch64
+tests were skipped), across 108 RUN lines:
+
+| metric | LSV | SandboxVectorizer |
+|---|---:|---:|
+| vector lanes created | 1874 | 1632 (87%) |
+| vector memory ops created | 542 | 274 (51%) |
+| scalar memory ops removed | 878 | 592 (67%) |
+
+Per function: 103 parity, 46 sbvec-better, 41 partial-miss, 92 full-miss.
+Leading attributed causes: stored value is neither a load nor a constant (43),
+loads-only chains with no store seed (21), non-power-of-2 chains (9).
+
+The run also surfaced three defects: an assertion in `Type.cpp` on
+`AMDGPU/pointer-elements.ll`, invalid IR (`vector element #1 is not of type
+'i32'`) on `AMDGPU/merge-stores.ll`, and an assertion in `VecUtils.h`
+(`isa<LoadOrStoreT>(Bndl[0])`) whenever `-sbvec-collect-seeds` includes loads,
+because `LoadStoreVec::runOnRegion` assumes the region's aux bundle holds
+stores.
+
 ## Caveats
 
 - RUN lines using `%if`, expecting a crash (`not --crash`), or with unmodelled
@@ -110,3 +132,8 @@ copy-pasteable repro command.
   `utils/update_test_checks.py` header; hand-written CHECK lines are listed for
   manual triage.
 - A `parity` verdict means equal lane counts, not identical IR.
+
+## License
+
+Apache License v2.0 with LLVM Exceptions, matching llvm-project — see
+[LICENSE.TXT](LICENSE.TXT).
