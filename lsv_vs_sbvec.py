@@ -187,7 +187,7 @@ def main() -> int:
     p = sub.add_parser("compare", help="run both vectorizers and report")
     add_common(p)
     p.add_argument("--out", default="./results", help="output directory")
-    p.add_argument("--pipeline", default="lsv-only",
+    p.add_argument("--pipeline", default="default",
                    help=f"sbvec pipeline preset {sorted(PIPELINES)} or a literal "
                         "-sbvec-passes string")
     p.add_argument("--jobs", "-j", type=int, default=os.cpu_count() or 4)

@@ -26,14 +26,12 @@ from .runline import (
 )
 
 # The default SandboxVectorizer pipeline is
-#   seed-collection<tr-save,bottom-up-vec,load-store-vec,tr-accept-or-revert>
-# For an apples-to-apples LSV comparison we drop bottom-up-vec.
+#   seed-collection<tr-save,bundle-vec,load-store-vec,tr-accept-or-revert>
 PIPELINES = {
-    "lsv-only": "seed-collection(enable-diff-types)"
-    "<tr-save,load-store-vec,tr-accept-or-revert>",
-    "lsv-only-notxn": "seed-collection(enable-diff-types)<load-store-vec>",
     "default": "seed-collection(enable-diff-types)"
-    "<tr-save,bottom-up-vec,load-store-vec,tr-accept-or-revert>",
+        "<tr-save,bundle-vec(bottom-up),load-store-vec,tr-accept-or-revert>",
+    "top-down": "seed-collection(enable-diff-types)"
+        "<tr-save,bundle-vec(top-down),load-store-vec,tr-accept-or-revert>"
 }
 
 ABLATIONS: list[tuple[str, list[str]]] = [
