@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 
-from . import blockers, metrics
+from . import blockers, metrics, staging
 from .discover import canonical_target
 from .runline import (
     OptCommand,
@@ -24,15 +24,6 @@ from .runline import (
     swap_pass,
     SBVEC_PASS_NAME,
 )
-
-# The default SandboxVectorizer pipeline is
-#   seed-collection<tr-save,bundle-vec,load-store-vec,tr-accept-or-revert>
-PIPELINES = {
-    "default": "seed-collection(enable-diff-types)"
-        "<tr-save,bundle-vec(bottom-up),load-store-vec,tr-accept-or-revert>",
-    "top-down": "seed-collection(enable-diff-types)"
-        "<tr-save,bundle-vec(top-down),load-store-vec,tr-accept-or-revert>"
-}
 
 ABLATIONS: list[tuple[str, list[str]]] = [
     ("allow-non-pow2", ["-sbvec-allow-non-pow2"]),
@@ -111,6 +102,11 @@ class CaseResult:
     functions: list[FunctionResult] = field(default_factory=list)
     # (ablation label, first error line) for knob configurations that crashed.
     ablation_failures: list[tuple[str, str]] = field(default_factory=list)
+    # One entry per vectorizer pass: {"after", "status", "detail", "cmd"},
+    # status being "ok", "invalid-ir" or "crash".
+    stage_verify: list[dict] = field(default_factory=list)
+    # First vectorizer pass whose output failed verification, if any.
+    verify_failed_after: str | None = None
 
 
 class Runner:
@@ -135,6 +131,7 @@ class Runner:
         self.keep_ir_dir = keep_ir_dir
         self.run_verify = run_verify
         self.ablate = ablate
+        self.stages = staging.stages(pipeline) if run_verify else []
 
     # -- process helpers -------------------------------------------------
     def _run(self, argv: list[str], cwd: str | None = None) -> ProcResult:
@@ -153,8 +150,37 @@ class Runner:
         except OSError as e:
             return ProcResult(argv, -1, "", str(e))
 
-    def _sbvec_flags(self, extra: list[str] | None = None) -> list[str]:
-        return [f"-sbvec-passes={self.pipeline}", *(extra or [])]
+    def _sbvec_flags(self, extra: list[str] | None = None,
+                     pipeline: str | None = None) -> list[str]:
+        return [f"-sbvec-passes={pipeline or self.pipeline}", *(extra or [])]
+
+    def _verify(self, ir: str) -> ProcResult:
+        return self._run_stdin([self.opt, "-passes=verify", "-disable-output"], ir)
+
+    def _verify_stages(self, res: CaseResult, sb_args, input_path) -> dict[str, str]:
+        """Verify the IR after each vectorizer pass; returns {stage label: IR}."""
+        outputs = {}
+        for st in self.stages:
+            argv = [self.opt, *sb_args, *self._sbvec_flags(pipeline=st.pipeline),
+                    input_path]
+            entry = {"after": st.after, "status": "ok", "detail": "",
+                     "cmd": shlex.join(argv)}
+            p = self._run(argv)
+            if not p.ok:
+                entry["status"] = "crash"
+                entry["detail"] = _first_error(p)
+            else:
+                outputs[st.label] = p.stdout
+                v = self._verify(p.stdout)
+                if not v.ok:
+                    entry["status"] = "invalid-ir"
+                    entry["detail"] = _first_error(v)
+            res.stage_verify.append(entry)
+            if entry["status"] != "ok" and res.verify_failed_after is None:
+                res.verify_failed_after = st.after
+                # Later stages include this pass too; they add no information.
+                break
+        return outputs
 
     # -- main entry point ------------------------------------------------
     def run_test(self, test_path: str) -> list[CaseResult]:
@@ -247,12 +273,22 @@ class Runner:
             res.detail = _first_error(sb)
             return res
 
-        if self.run_verify and sb.stdout != base.stdout:
-            v = self._run_stdin([self.opt, "-passes=verify", "-disable-output"], sb.stdout)
+        stage_ir = {}
+        if self.run_verify:
+            stage_ir = self._verify_stages(res, sb_args, input_path)
+            v = self._verify(sb.stdout)
             if not v.ok:
                 res.status = "sbvec-verify-failed"
                 res.detail = _first_error(v)
-                # keep going: still report the metrics below
+            elif res.verify_failed_after:
+                # The final IR is valid, but a vectorizer pass produced invalid
+                # IR (or crashed) on the way there.
+                res.status = "sbvec-stage-verify-failed"
+            if res.verify_failed_after:
+                bad = res.stage_verify[-1]
+                res.detail = (f"after {bad['after']} ({bad['status']}): "
+                              f"{bad['detail']}")
+            # keep going: still report the metrics below
 
         m_in = metrics.parse_module(base.stdout)
         m_lsv = metrics.parse_module(lsv.stdout)
@@ -289,7 +325,7 @@ class Runner:
             self._ablate(res, sb_args, input_path, m_in)
 
         if self.keep_ir_dir:
-            self._dump(res, base.stdout, lsv.stdout, sb.stdout, sb.stderr)
+            self._dump(res, base.stdout, lsv.stdout, sb.stdout, sb.stderr, stage_ir)
         return res
 
     def _run_stdin(self, argv: list[str], data: str) -> ProcResult:
@@ -328,7 +364,7 @@ class Runner:
             if all(f.recovered_by for f in missed.values()):
                 break
 
-    def _dump(self, res: CaseResult, base, lsv, sb, sb_err):
+    def _dump(self, res: CaseResult, base, lsv, sb, sb_err, stage_ir):
         d = os.path.join(
             self.keep_ir_dir,
             res.test.replace("/", "__").removesuffix(".ll") + f".L{res.run_line}",
@@ -339,7 +375,10 @@ class Runner:
             ("lsv.ll", lsv),
             ("sbvec.ll", sb),
             ("sbvec.stderr", sb_err),
-            ("commands.txt", f"{res.cmd_lsv}\n{res.cmd_sbvec}\n"),
+            ("commands.txt", "\n".join(
+                [res.cmd_lsv, res.cmd_sbvec, *(e["cmd"] for e in res.stage_verify)]
+            ) + "\n"),
+            *((f"sbvec.after-{label}.ll", ir) for label, ir in stage_ir.items()),
         ):
             with open(os.path.join(d, name), "w") as f:
                 f.write(blob)

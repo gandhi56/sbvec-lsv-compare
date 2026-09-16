@@ -15,7 +15,7 @@ Lives outside `llvm-project`; nothing in the checkout is modified unless you run
   triple is not built are **skipped** (with `--allow-unsupported-target` they run
   against generic TTI, which is not representative). To cover everything:
   `-DLLVM_TARGETS_TO_BUILD="X86;AMDGPU;NVPTX;AArch64"`.
-- Python 3.10+, no third-party packages.
+- Python 3.11+ (for `tomllib`), no third-party packages.
 
 ## Usage
 
@@ -37,9 +37,28 @@ python3 lsv_vs_sbvec.py rewrite --apply --update-checks   # edits llvm-project
 
 Useful flags: `--llvm-root`, `--build-dir`, `--filter SUBSTR`, `--tests f.ll ...`,
 `--test-root llvm/test/CodeGen`, `-j N`, `--timeout SECS`, `--no-ablate`,
-`--pipeline {lsv-only,lsv-only-notxn,default}`.
+`--config PATH`, `--pipeline NAME`.
 
 Revert an applied rewrite with `git checkout -- llvm/test`.
+
+## Pipeline configuration
+
+The SandboxVectorizer pipelines live in [`pipelines.toml`](pipelines.toml):
+
+```toml
+[pipelines]
+default  = "seed-collection(enable-diff-types)<tr-save,bundle-vec(bottom-up),load-store-vec,tr-accept-or-revert>"
+lsv-only = "seed-collection(enable-diff-types)<tr-save,load-store-vec,tr-accept-or-revert>"
+
+[defaults]          # used when --pipeline is omitted
+compare = "default"
+rewrite = "lsv-only"
+```
+
+Add entries to `[pipelines]` and select them with `--pipeline NAME`, or point
+`--config` at a different file. `--pipeline` also accepts a literal
+`-sbvec-passes` string (anything containing `<` or `(`); unknown names are an
+error. The pipeline used is recorded in `summary.md`.
 
 ## How the comparison works
 
@@ -50,12 +69,32 @@ For every RUN line that drives `opt -passes=...load-store-vectorizer...`:
 2. The command is normalised (`-S -o -`, redirects and `FileCheck` stripped) and
    run three times: unchanged input (baseline), LSV, and SandboxVectorizer.
 3. The SandboxVectorizer invocation is the original command with the pass name
-   swapped plus
-   `-sbvec-passes="seed-collection(enable-diff-types)<tr-save,load-store-vec,tr-accept-or-revert>"`
-   — the upstream default pipeline minus `bottom-up-vec`, so only LoadStoreVec is
-   measured. All other flags (`-mtriple`, `-mcpu`, `-mattr`, `-aa-pipeline`) are
+   swapped plus `-sbvec-passes="<pipeline>"`, the selected pipeline from
+   `pipelines.toml`. All other flags (`-mtriple`, `-mcpu`, `-mattr`, `-aa-pipeline`) are
    preserved.
-4. The output IR of both is verified with `opt -passes=verify` and counted.
+4. The SandboxVectorizer IR is verified after each vectorizer pass (see
+   below) and at the end, then both outputs are counted.
+
+### IR verification after each vectorizer pass
+
+The SandboxVectorizer has no verifier region pass (`-sbvec-always-verify`
+exists only in assertion builds and only covers `bundle-vec`). So the harness
+cuts the pipeline after each vectorizer region pass (`bundle-vec`,
+`load-store-vec`, `pack-reuse`), adds `tr-accept`, and runs
+`opt -passes=verify` on the result:
+
+```
+bundle-vec      seed-collection(enable-diff-types)<tr-save,bundle-vec(bottom-up),tr-accept>
+load-store-vec  seed-collection(enable-diff-types)<tr-save,bundle-vec(bottom-up),load-store-vec,tr-accept>
+```
+
+`tr-accept` keeps the pass's output even when the full pipeline would revert
+it as unprofitable, so invalid IR is caught before cost checks can hide it.
+The first failing pass is reported as `verify_failed_after`. RUN lines are
+marked `sbvec-verify-failed` when the final IR is invalid, and
+`sbvec-stage-verify-failed` when only an intermediate stage is invalid or
+crashes. Because every region is accepted, later regions within a stage may see
+different IR than in the full pipeline. `--no-verify` turns all of this off.
 
 ### Why IR counting, not `-stats`
 
@@ -100,7 +139,7 @@ copy-pasteable repro command.
 | `per_test.csv` | one row per RUN line |
 | `per_function.csv` | one row per function per RUN line, with ablation results |
 | `results.json` | everything, for further analysis |
-| `ir/` | with `--keep-ir`: input / LSV / SandboxVectorizer IR and stderr per case |
+| `ir/` | with `--keep-ir`: input / LSV / SandboxVectorizer IR and stderr per case, plus `sbvec.after-<N>-<pass>.ll` for each verification stage |
 
 ## Sample results
 

@@ -24,6 +24,7 @@ PER_TEST_FIELDS = [
     "lsv_vec_mem_ops", "sbvec_vec_mem_ops",
     "lsv_scalar_removed", "sbvec_scalar_removed",
     "lsv_overhead", "sbvec_overhead",
+    "verify_failed_after",
     "cmd_sbvec",
 ]
 
@@ -38,6 +39,7 @@ def write_per_test_csv(results: list[CaseResult], path: str) -> None:
                 "test": r.test,
                 "run_line": r.run_line,
                 "status": r.status,
+                "verify_failed_after": r.verify_failed_after or "",
                 "triple": r.triple or "",
                 "detail": r.detail,
                 "input_vec_lanes": i.get("vec_lanes", ""),
@@ -164,7 +166,29 @@ def write_summary(results: list[CaseResult], path: str, meta: dict) -> str:
             L.append(f"| `{k}` | {v} | {DESCRIPTIONS.get(k, '')} |")
         L.append("")
 
-    crashes = [r for r in results if r.status in ("sbvec-crash", "sbvec-timeout", "sbvec-error", "sbvec-verify-failed")]
+    verified = [r for r in results if r.stage_verify]
+    if verified:
+        L.append("## IR verification after each vectorizer pass\n")
+        L.append("Each stage runs the pipeline up to and including the pass, "
+                 "then `tr-accept`, and verifies the result.\n")
+        L.append("| pass | RUN lines verified | invalid IR | crashed |")
+        L.append("|---|---:|---:|---:|")
+        passes = list(dict.fromkeys(e["after"] for r in verified for e in r.stage_verify))
+        for name in passes:
+            entries = [e for r in verified for e in r.stage_verify if e["after"] == name]
+            n_bad = sum(e["status"] == "invalid-ir" for e in entries)
+            n_crash = sum(e["status"] == "crash" for e in entries)
+            L.append(f"| `{name}` | {len(entries)} | {n_bad} | {n_crash} |")
+        L.append("")
+        for r in verified:
+            if r.verify_failed_after:
+                bad = r.stage_verify[-1]
+                L.append(f"- `{r.test}:{r.run_line}` — after **{bad['after']}** "
+                         f"({bad['status']}) — {bad['detail']}")
+                L.append(f"  - `{bad['cmd']}`")
+        L.append("")
+
+    crashes = [r for r in results if r.status in ("sbvec-crash", "sbvec-timeout", "sbvec-error", "sbvec-verify-failed", "sbvec-stage-verify-failed")]
     if crashes:
         L.append("## SandboxVectorizer failures\n")
         for r in crashes:

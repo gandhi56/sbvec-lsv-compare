@@ -20,9 +20,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from sbveccmp import report, rewrite as rewrite_mod  # noqa: E402
+from sbveccmp import config as config_mod, report, rewrite as rewrite_mod, staging  # noqa: E402
 from sbveccmp.discover import find_tests, registered_targets  # noqa: E402
-from sbveccmp.runner import ABLATIONS, PIPELINES, Runner  # noqa: E402
+from sbveccmp.runner import ABLATIONS, Runner  # noqa: E402
 
 DEFAULT_LLVM_ROOT = os.path.expanduser("~/llvm-project")
 
@@ -39,6 +39,25 @@ def add_common(p: argparse.ArgumentParser) -> None:
                         "(default: llvm/test/Transforms/LoadStoreVectorizer)")
     p.add_argument("--filter", default=None,
                    help="only tests whose path contains this substring")
+
+
+def add_pipeline_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--config", default=config_mod.DEFAULT_CONFIG,
+                   help="pipeline config file (default: %(default)s)")
+    p.add_argument("--pipeline", default=None,
+                   help="pipeline name from the config file, or a literal "
+                        "-sbvec-passes string (default: [defaults] in the "
+                        "config file)")
+
+
+def resolve_pipeline(args) -> tuple[str, str]:
+    try:
+        cfg = config_mod.load(args.config)
+        name, pipeline = cfg.resolve(args.pipeline, args.cmd)
+        staging.parse(pipeline)
+        return name, pipeline
+    except (config_mod.ConfigError, ValueError) as e:
+        sys.exit(f"error: {e}")
 
 
 def resolve_paths(args) -> tuple[str, str]:
@@ -85,7 +104,7 @@ def cmd_compare(args) -> int:
     if ir_dir:
         os.makedirs(ir_dir, exist_ok=True)
 
-    pipeline = PIPELINES.get(args.pipeline, args.pipeline)
+    pipeline_name, pipeline = resolve_pipeline(args)
     targets = registered_targets(os.path.dirname(opt))
 
     runner = Runner(
@@ -121,7 +140,7 @@ def cmd_compare(args) -> int:
     meta = {
         "opt": opt,
         "llvm-root": llvm_root,
-        "sbvec pipeline": pipeline,
+        "sbvec pipeline": f"{pipeline_name}: {pipeline}",
         "registered targets": ",".join(sorted(targets)) or "unknown",
         "test files": len(tests),
         "wall time": f"{elapsed:.1f}s",
@@ -144,7 +163,7 @@ def cmd_rewrite(args) -> int:
 
     out_dir = os.path.abspath(os.path.expanduser(args.out))
     os.makedirs(out_dir, exist_ok=True)
-    pipeline = PIPELINES.get(args.pipeline, args.pipeline)
+    _, pipeline = resolve_pipeline(args)
     patch_path = os.path.join(out_dir, "rewrite.patch")
 
     changed, patch = rewrite_mod.run_rewrite(
@@ -187,9 +206,7 @@ def main() -> int:
     p = sub.add_parser("compare", help="run both vectorizers and report")
     add_common(p)
     p.add_argument("--out", default="./results", help="output directory")
-    p.add_argument("--pipeline", default="default",
-                   help=f"sbvec pipeline preset {sorted(PIPELINES)} or a literal "
-                        "-sbvec-passes string")
+    add_pipeline_args(p)
     p.add_argument("--jobs", "-j", type=int, default=os.cpu_count() or 4)
     p.add_argument("--timeout", type=int, default=120, help="seconds per opt run")
     p.add_argument("--keep-ir", action="store_true",
@@ -198,7 +215,8 @@ def main() -> int:
                    help="skip the relaxed-knob re-runs "
                         f"({', '.join(n for n, _ in ABLATIONS)})")
     p.add_argument("--no-verify", action="store_true",
-                   help="skip running the IR verifier on sbvec output")
+                   help="skip verifying the sbvec IR (after each vectorizer "
+                        "pass and at the end)")
     p.add_argument("--allow-unsupported-target", action="store_true",
                    help="run tests whose triple is not built into this opt "
                         "(they fall back to generic TTI)")
@@ -208,7 +226,7 @@ def main() -> int:
     p = sub.add_parser("rewrite", help="swap the pass in RUN lines")
     add_common(p)
     p.add_argument("--out", default="./results", help="where to write the patch")
-    p.add_argument("--pipeline", default="lsv-only")
+    add_pipeline_args(p)
     p.add_argument("--sbvec-flag", action="append",
                    help="extra opt flag to add to rewritten RUN lines "
                         "(repeatable), e.g. --sbvec-flag=-sbvec-allow-non-pow2")
