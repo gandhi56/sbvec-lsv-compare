@@ -1,0 +1,21 @@
+# SandboxVectorizer pipelines, passed to opt as -sbvec-passes="<value>".
+#
+# Select one with `--pipeline NAME`; use another file with `--config PATH`.
+# Whitespace in a value is stripped, so long pipelines can be split with a
+# TOML line-ending backslash:
+#
+#   my-pipeline = """seed-collection(enable-diff-types)<\
+#       tr-save, load-store-vec, tr-accept-or-revert>"""
+
+[pipelines]
+# Upstream default.
+default = "seed-collection(enable-diff-types)<tr-save,bundle-vec(bottom-up),load-store-vec,tr-accept-or-revert>"
+top-down = "seed-collection(enable-diff-types)<tr-save,bundle-vec(top-down),load-store-vec,tr-accept-or-revert>"
+# LoadStoreVec on its own, without bundle-vec.
+lsv-only = "seed-collection(enable-diff-types)<tr-save,load-store-vec,tr-accept-or-revert>"
+bundle-vec-only = "seed-collection(enable-diff-types)<tr-save,bundle-vec(bottom-up),tr-accept-or-revert>"
+
+# Pipeline used by each subcommand when --pipeline is not given.
+[defaults]
+compare = "default"
+rewrite = "lsv-only"
